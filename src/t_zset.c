@@ -116,6 +116,7 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
     x = zsl->header;
     for (i = zsl->level-1; i >= 0; i--) {
         /* store rank that is crossed to reach the insert position */
+        // rank[i] 为第 i 层遍历路径中最右节点排名
         rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
         while (x->level[i].forward &&
             (x->level[i].forward->score < score ||
@@ -130,8 +131,12 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
      * scores, and the re-insertion of score and redis object should never
      * happen since the caller of zslInsert() should test in the hash table
      * if the element is already inside or not. */
+    // 按概率计算当前节点层数
     level = zslRandomLevel();
+    // 新节点层数超过当前最高层数
     if (level > zsl->level) {
+        // 对超过当前最高层数设置 rank[i] 和 update[i]
+        // update[i] 表示第 i 层遍历路径中最右节点指针
         for (i = zsl->level; i < level; i++) {
             rank[i] = 0;
             update[i] = zsl->header;
@@ -140,25 +145,33 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
         zsl->level = level;
     }
     x = zslCreateNode(level,score,obj);
+    // 将 x 插入skiplist 后，更新其前进节点、跨度 span 和遍历路径中 update[i]
     for (i = 0; i < level; i++) {
+        // x 在当前层的前进节点为 update[i] 在当前层的前进节点
         x->level[i].forward = update[i]->level[i].forward;
+        // update[i] 在当前层的前进节点更新为 x
         update[i]->level[i].forward = x;
 
         /* update span covered by update[i] as x is inserted here */
+        // x 在当前层的跨度 span 为 update[i] 原跨度减去 x 与 update[i] 之间的距离
         x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
+        // update[i] 在当前层跨度更新为 x 到 update[i] 的距离
         update[i]->level[i].span = (rank[0] - rank[i]) + 1;
     }
 
     /* increment span for untouched levels */
+    // 对于超过 x 层数的 update[i], 跨度增加 1
     for (i = level; i < zsl->level; i++) {
         update[i]->level[i].span++;
     }
 
+    // 更新 x 及 x 在 0 层的前进节点的后退指针
     x->backward = (update[0] == zsl->header) ? NULL : update[0];
     if (x->level[0].forward)
         x->level[0].forward->backward = x;
     else
         zsl->tail = x;
+    // skiplist 长度加 1
     zsl->length++;
     return x;
 }
@@ -167,18 +180,24 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
 void zslDeleteNode(zskiplist *zsl, zskiplistNode *x, zskiplistNode **update) {
     int i;
     for (i = 0; i < zsl->level; i++) {
+        // update[i]->level[i] 为遍历路径中第 i 层的最右节点
         if (update[i]->level[i].forward == x) {
+            // 当前节点的前进节点为 x，则更新当前节点的跨度 span 和 前进节点 forward
             update[i]->level[i].span += x->level[i].span - 1;
             update[i]->level[i].forward = x->level[i].forward;
         } else {
+            // 前进节点不为 x，则跨度 span 减少 x 一个节点
             update[i]->level[i].span -= 1;
         }
     }
+
     if (x->level[0].forward) {
+        // 将 x->level[0] 从链表中移除
         x->level[0].forward->backward = x->backward;
     } else {
         zsl->tail = x->backward;
     }
+    // 移除节点 x 后，更新 zskiplist 中 level 与 length
     while(zsl->level > 1 && zsl->header->level[zsl->level-1].forward == NULL)
         zsl->level--;
     zsl->length--;
@@ -191,15 +210,18 @@ int zslDelete(zskiplist *zsl, double score, robj *obj) {
 
     x = zsl->header;
     for (i = zsl->level-1; i >= 0; i--) {
+        // 当前层存在前进节点且 前进节点 score-obj 小于目标 score-obj, 则在该层向右遍历，直到层数为 0
         while (x->level[i].forward &&
             (x->level[i].forward->score < score ||
                 (x->level[i].forward->score == score &&
                 compareStringObjects(x->level[i].forward->obj,obj) < 0)))
             x = x->level[i].forward;
+        // update 用来记录遍历路径
         update[i] = x;
     }
     /* We may have multiple elements with the same score, what we need
      * is to find the element with both the right score and object. */
+    // 此时 x 为 score-obj 均小于目标值的最大值
     x = x->level[0].forward;
     if (x && score == x->score && equalStringObjects(x->obj,obj)) {
         zslDeleteNode(zsl, x, update);
@@ -385,6 +407,7 @@ unsigned long zslDeleteRangeByRank(zskiplist *zsl, unsigned int start, unsigned 
  * first element. */
 unsigned long zslGetRank(zskiplist *zsl, double score, robj *o) {
     zskiplistNode *x;
+    // 初始化排名为 0
     unsigned long rank = 0;
     int i;
 
@@ -394,31 +417,37 @@ unsigned long zslGetRank(zskiplist *zsl, double score, robj *o) {
             (x->level[i].forward->score < score ||
                 (x->level[i].forward->score == score &&
                 compareStringObjects(x->level[i].forward->obj,o) <= 0))) {
+            // 最终排名为遍历路径中的跨度和
             rank += x->level[i].span;
             x = x->level[i].forward;
         }
 
         /* x might be equal to zsl->header, so test if obj is non-NULL */
+        // 如果 x 即为目标节点，直接返回结果
         if (x->obj && equalStringObjects(x->obj,o)) {
             return rank;
         }
     }
+    // 未找到目标节点
     return 0;
 }
 
 /* Finds an element by its rank. The rank argument needs to be 1-based. */
 zskiplistNode* zslGetElementByRank(zskiplist *zsl, unsigned long rank) {
     zskiplistNode *x;
+    // traversed 表示已遍历过的节点数
     unsigned long traversed = 0;
     int i;
 
     x = zsl->header;
     for (i = zsl->level-1; i >= 0; i--) {
+        // 若加上当前节点跨度后仍小于 rank，继续向右遍历
         while (x->level[i].forward && (traversed + x->level[i].span) <= rank)
         {
             traversed += x->level[i].span;
             x = x->level[i].forward;
         }
+        // 直到 traversed 等于 rank
         if (traversed == rank) {
             return x;
         }
@@ -1116,6 +1145,7 @@ void zsetConvert(robj *zobj, int encoding) {
         sptr = ziplistNext(zl,eptr);
         redisAssertWithInfo(NULL,zobj,sptr != NULL);
 
+        // 逐个将 ziplist 节点转换为 skiplist
         while (eptr != NULL) {
             score = zzlGetScore(sptr);
             redisAssertWithInfo(NULL,zobj,ziplistGet(eptr,&vstr,&vlen,&vlong));
@@ -1131,6 +1161,7 @@ void zsetConvert(robj *zobj, int encoding) {
             zzlNext(zl,&eptr,&sptr);
         }
 
+        // 释放原 ziplist 内存
         zfree(zobj->ptr);
         zobj->ptr = zs;
         zobj->encoding = REDIS_ENCODING_SKIPLIST;
@@ -1142,12 +1173,14 @@ void zsetConvert(robj *zobj, int encoding) {
 
         /* Approach similar to zslFree(), since we want to free the skiplist at
          * the same time as creating the ziplist. */
+        // 释放原 zskiplist 和 dict 内存
         zs = zobj->ptr;
         dictRelease(zs->dict);
         node = zs->zsl->header->level[0].forward;
         zfree(zs->zsl->header);
         zfree(zs->zsl);
 
+        // 逐个将 skiplist 中节点转换为 ziplist 节点
         while (node) {
             ele = getDecodedObject(node->obj);
             zl = zzlInsertAt(zl,NULL,ele,node->score);
@@ -1178,6 +1211,7 @@ void zsetConvert(robj *zobj, int encoding) {
 #define ZADD_CH (1<<3)      /* Return num of elements added or updated. */
 void zaddGenericCommand(redisClient *c, int flags) {
     static char *nanerr = "resulting score is not a number (NaN)";
+    // 从 redisClient 获取 key
     robj *key = c->argv[1];
     robj *ele;
     robj *zobj;
@@ -1188,14 +1222,20 @@ void zaddGenericCommand(redisClient *c, int flags) {
     /* The following vars are used in order to track what the command actually
      * did during the execution, to reply to the client and to trigger the
      * notification of keyspace change. */
+    // 添加元素的数量
     int added = 0;      /* Number of new elements added. */
+    // 更新 score 元素的数量
     int updated = 0;    /* Number of elements with updated score. */
+    // todo
     int processed = 0;  /* Number of elements processed, may remain zero with
                            options like XX. */
 
     /* Parse options. At the end 'scoreidx' is set to the argument position
      * of the score of the first score-element pair. */
+    // 命令格式为 ZADD key [ NX | XX] [ GT | LT] [CH] [INCR] score member [ score member ...]
+    // scoreidx 最后为参数中第一个 score-element 对中 score 的索引位置
     scoreidx = 2;
+    // argc 为 argv[] 内参数数量
     while(scoreidx < c->argc) {
         char *opt = c->argv[scoreidx]->ptr;
         if (!strcasecmp(opt,"nx")) flags |= ZADD_NX;
@@ -1207,6 +1247,7 @@ void zaddGenericCommand(redisClient *c, int flags) {
     }
 
     /* Turn options into simple to check vars. */
+    // 参数选项转换为标记
     int incr = (flags & ZADD_INCR) != 0;
     int nx = (flags & ZADD_NX) != 0;
     int xx = (flags & ZADD_XX) != 0;
@@ -1214,20 +1255,25 @@ void zaddGenericCommand(redisClient *c, int flags) {
 
     /* After the options, we expect to have an even number of args, since
      * we expect any number of score-element pairs. */
+    // score 和 member 在命令中成对出现，elements 应为偶数
     elements = c->argc-scoreidx;
     if (elements % 2) {
+        // 缺少参数，中断操作。向 redisClient 缓冲区写入 syntaxerr 错误信息(network 相关接口，可另外研究)
         addReply(c,shared.syntaxerr);
         return;
     }
     elements /= 2; /* Now this holds the number of score-element pairs. */
+    // 到此 elements 就是实际要添加的元素数量了
 
     /* Check for incompatible options. */
+    // 命令兼容检查
     if (nx && xx) {
         addReplyError(c,
             "XX and NX options at the same time are not compatible");
         return;
     }
 
+    // incr 命令只能针对一个元素对
     if (incr && elements > 1) {
         addReplyError(c,
             "INCR option supports a single increment-element pair");
@@ -1237,16 +1283,24 @@ void zaddGenericCommand(redisClient *c, int flags) {
     /* Start parsing all the scores, we need to emit any syntax error
      * before executing additions to the sorted set, as the command should
      * either execute fully or nothing at all. */
+    // 处理 score 前，检查命令中是否存在语法错误。
     scores = zmalloc(sizeof(double)*elements);
     for (j = 0; j < elements; j++) {
+        // 将 argv[scoreidx + j * 2] 转为 double 并存入 scores[j]
+        // 若转换失败，中断操作
         if (getDoubleFromObjectOrReply(c,c->argv[scoreidx+j*2],&scores[j],NULL)
             != REDIS_OK) goto cleanup;
     }
 
     /* Lookup the key and create the sorted set if does not exist. */
+    // 查找 key 对应的 value(DB 相关 API，可另外研究)
     zobj = lookupKeyWrite(c->db,key);
+    // key 不存在
     if (zobj == NULL) {
+        // 命令为 XX，中断操作
         if (xx) goto reply_to_client; /* No key + XX option: nothing to do. */
+        // 其他命令类型，初始化 zset 对象
+        // ziplist 最大允许节点数不为 0 且 待添加元素未超过 ziplist 阈值则使用 zskiplist 编码
         if (server.zset_max_ziplist_entries == 0 ||
             server.zset_max_ziplist_value < sdslen(c->argv[scoreidx+1]->ptr))
         {
@@ -1254,8 +1308,10 @@ void zaddGenericCommand(redisClient *c, int flags) {
         } else {
             zobj = createZsetZiplistObject();
         }
+        // 添加键值对 key -> zobj
         dbAdd(c->db,key,zobj);
     } else {
+        // key 对应的元素类型非 zset, 中断操作
         if (zobj->type != REDIS_ZSET) {
             addReply(c,shared.wrongtypeerr);
             goto cleanup;
@@ -1266,10 +1322,14 @@ void zaddGenericCommand(redisClient *c, int flags) {
         score = scores[j];
 
         if (zobj->encoding == REDIS_ENCODING_ZIPLIST) {
+            // 编码格式为 ziplist
+            // 目标位置元素指针
             unsigned char *eptr;
 
             /* Prefer non-encoded element when dealing with ziplists. */
+            // 获取当前处理的 element。由于 ziplist 内会重新压缩，这里不需要编码
             ele = c->argv[scoreidx+1+j*2];
+            // 在 ziplist 中查找对应的 eptr, 使得 *etpr 与 *(ele->ptr) 相等
             if ((eptr = zzlFind(zobj->ptr,ele,&curscore)) != NULL) {
                 if (nx) continue;
                 if (incr) {
@@ -1281,6 +1341,7 @@ void zaddGenericCommand(redisClient *c, int flags) {
                 }
 
                 /* Remove and re-insert when score changed. */
+                // score 发生变化时，删除旧节点，添加新节点
                 if (score != curscore) {
                     zobj->ptr = zzlDelete(zobj->ptr,eptr);
                     zobj->ptr = zzlInsert(zobj->ptr,ele,score);
@@ -1289,9 +1350,11 @@ void zaddGenericCommand(redisClient *c, int flags) {
                 }
                 processed++;
             } else if (!xx) {
+                // 未找到对应元素且非 XX 类型命令
                 /* Optimize: check if the element is too large or the list
                  * becomes too long *before* executing zzlInsert. */
                 zobj->ptr = zzlInsert(zobj->ptr,ele,score);
+                // 集合长度或元素大小超过 ziplist 限制，转换编码格式为 skiplist
                 if (zzlLength(zobj->ptr) > server.zset_max_ziplist_entries)
                     zsetConvert(zobj,REDIS_ENCODING_SKIPLIST);
                 if (sdslen(ele->ptr) > server.zset_max_ziplist_value)
@@ -1307,11 +1370,13 @@ void zaddGenericCommand(redisClient *c, int flags) {
 
             ele = c->argv[scoreidx+1+j*2] =
                 tryObjectEncoding(c->argv[scoreidx+1+j*2]);
+            // zset 中元素对应的实际数据（dict 接口，可另外研究）
             de = dictFind(zs->dict,ele);
             if (de != NULL) {
+                // 命令类型为 NX，中断当前元素操作。
                 if (nx) continue;
-                curobj = dictGetKey(de);
-                curscore = *(double*)dictGetVal(de);
+                curobj = dictGetKey(de);  // 即 de->key
+                curscore = *(double*)dictGetVal(de); // de->value
 
                 if (incr) {
                     score += curscore;
@@ -1326,16 +1391,21 @@ void zaddGenericCommand(redisClient *c, int flags) {
                 /* Remove and re-insert when score changed. We can safely
                  * delete the key object from the skiplist, since the
                  * dictionary still has a reference to it. */
+                // 因为 dict 中保留了元素的引用，在 skiplist 中临时删除 key 是安全的
                 if (score != curscore) {
+                    // 从 skiplist 中删除节点 curobj
                     redisAssertWithInfo(c,curobj,zslDelete(zs->zsl,curscore,curobj));
+                    // 在 skiplist 中添加新节点
                     znode = zslInsert(zs->zsl,score,curobj);
                     incrRefCount(curobj); /* Re-inserted in skiplist. */
+                    // 更新 dict 中 score 值
                     dictGetVal(de) = &znode->score; /* Update score ptr. */
                     server.dirty++;
                     updated++;
                 }
                 processed++;
             } else if (!xx) {
+                // 不存在该元素且命令类型不为 XX, 直接添加节点
                 znode = zslInsert(zs->zsl,score,ele);
                 incrRefCount(ele); /* Inserted in skiplist. */
                 redisAssertWithInfo(c,NULL,dictAdd(zs->dict,ele,&znode->score) == DICT_OK);
@@ -2151,6 +2221,7 @@ void zinterstoreCommand(redisClient *c) {
     zunionInterGenericCommand(c,c->argv[1], REDIS_OP_INTER);
 }
 
+// ZRANGE key start stop [ BYSCORE | BYLEX] [REV] [LIMIT offset count] [WITHSCORES]
 void zrangeGenericCommand(redisClient *c, int reverse) {
     robj *key = c->argv[1];
     robj *zobj;
@@ -2160,9 +2231,11 @@ void zrangeGenericCommand(redisClient *c, int reverse) {
     int llen;
     int rangelen;
 
+    // argv[2] 为 start, argv[3] 为 stop，检查参数为数值，否则中断操作
     if ((getLongFromObjectOrReply(c, c->argv[2], &start, NULL) != REDIS_OK) ||
         (getLongFromObjectOrReply(c, c->argv[3], &end, NULL) != REDIS_OK)) return;
 
+    // withscores 参数检查
     if (c->argc == 5 && !strcasecmp(c->argv[4]->ptr,"withscores")) {
         withscores = 1;
     } else if (c->argc >= 5) {
@@ -2170,10 +2243,12 @@ void zrangeGenericCommand(redisClient *c, int reverse) {
         return;
     }
 
+    // 检查 zobj 编码格式为 ZSET
     if ((zobj = lookupKeyReadOrReply(c,key,shared.emptymultibulk)) == NULL
          || checkType(c,zobj,REDIS_ZSET)) return;
 
     /* Sanitize indexes. */
+    // 修正 [start, stop] 参数值
     llen = zsetLength(zobj);
     if (start < 0) start = llen+start;
     if (end < 0) end = llen+end;
@@ -2181,11 +2256,13 @@ void zrangeGenericCommand(redisClient *c, int reverse) {
 
     /* Invariant: start >= 0, so this test will be true when end < 0.
      * The range is empty when start > end or start >= length. */
+    // 检查 [start, end] 区间是否合法
     if (start > end || start >= llen) {
         addReply(c,shared.emptymultibulk);
         return;
     }
     if (end >= llen) end = llen-1;
+    // 目标区间长度
     rangelen = (end-start)+1;
 
     /* Return the result in form of a multi-bulk reply */
@@ -2198,6 +2275,7 @@ void zrangeGenericCommand(redisClient *c, int reverse) {
         unsigned int vlen;
         long long vlong;
 
+        // eptr 为 element 指针，sptr 为 score 指针
         if (reverse)
             eptr = ziplistIndex(zl,-2-(2*start));
         else
@@ -2209,14 +2287,17 @@ void zrangeGenericCommand(redisClient *c, int reverse) {
         while (rangelen--) {
             redisAssertWithInfo(c,zobj,eptr != NULL && sptr != NULL);
             redisAssertWithInfo(c,zobj,ziplistGet(eptr,&vstr,&vlen,&vlong));
+            // 将 element 添加至客户端返回结果(long 或 string)
             if (vstr == NULL)
                 addReplyBulkLongLong(c,vlong);
             else
                 addReplyBulkCBuffer(c,vstr,vlen);
 
+            // 将 score 添加至客户端返回结果
             if (withscores)
                 addReplyDouble(c,zzlGetScore(sptr));
 
+            // 处理下一个节点
             if (reverse)
                 zzlPrev(zl,&eptr,&sptr);
             else
@@ -2837,6 +2918,8 @@ void zscoreCommand(redisClient *c) {
     }
 }
 
+// ZRANK key member
+// ZREVRANK key member
 void zrankGenericCommand(redisClient *c, int reverse) {
     robj *key = c->argv[1];
     robj *ele = c->argv[2];
@@ -2844,16 +2927,19 @@ void zrankGenericCommand(redisClient *c, int reverse) {
     unsigned long llen;
     unsigned long rank;
 
+    // 检查 key 对应的 zobj 是否为 ZSET 类型，否则中止操作
     if ((zobj = lookupKeyReadOrReply(c,key,shared.nullbulk)) == NULL ||
         checkType(c,zobj,REDIS_ZSET)) return;
     llen = zsetLength(zobj);
 
+    // 检查 element 编码为 RAW 或 EMBSTR
     redisAssertWithInfo(c,ele,sdsEncodedObject(ele));
 
     if (zobj->encoding == REDIS_ENCODING_ZIPLIST) {
         unsigned char *zl = zobj->ptr;
         unsigned char *eptr, *sptr;
 
+        // eptr 为目标节点 member 指针，sptr 为目标节点 score 指针初始值为 ziplist 中头结点
         eptr = ziplistIndex(zl,0);
         redisAssertWithInfo(c,zobj,eptr != NULL);
         sptr = ziplistNext(zl,eptr);
@@ -2885,6 +2971,7 @@ void zrankGenericCommand(redisClient *c, int reverse) {
         de = dictFind(zs->dict,ele);
         if (de != NULL) {
             score = *(double*)dictGetVal(de);
+            // 从 skiplist 获取排名
             rank = zslGetRank(zsl,score,ele);
             redisAssertWithInfo(c,ele,rank); /* Existing elements always have a rank. */
             if (reverse)
@@ -2892,6 +2979,7 @@ void zrankGenericCommand(redisClient *c, int reverse) {
             else
                 addReplyLongLong(c,rank-1);
         } else {
+            // member 不存在，中断操作
             addReply(c,shared.nullbulk);
         }
     } else {
